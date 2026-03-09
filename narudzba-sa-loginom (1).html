@@ -1,0 +1,1722 @@
+<!DOCTYPE html>
+<html lang="sl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Baščaršija — Sistem Narudžbina</title>
+
+<!-- PWA -->
+<meta name="application-name" content="Baščaršija">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Baščaršija">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#332823">
+<meta name="description" content="Sistem narudžbina — Baščaršija d.o.o.">
+<link rel="manifest" id="pwa-manifest">
+
+<link href="https://fonts.googleapis.com/css2?family=Sanchez:ital@0;1&family=Source+Code+Pro:wght@400;500;600&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+  import { getFirestore, doc, getDoc, setDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+  // ╔══════════════════════════════════════════════╗
+  // ║  TVOJA FIREBASE KONFIGURACIJA — ZAMIJENI!    ║
+  // ╚══════════════════════════════════════════════╝
+  const firebaseConfig = {
+    apiKey:            "AIzaSyASk4RRI1Gq2tMwNKh5RbQli-c1e3TeX-w",
+    authDomain:        "bascarsija-narudzbe.firebaseapp.com",
+    projectId:         "bascarsija-narudzbe",
+    storageBucket:     "bascarsija-narudzbe.firebasestorage.app",
+    messagingSenderId: "863931178173",
+    appId:             "1:863931178173:web:9ab884416bf56fe3342bd4"
+  };
+
+  // ╔══════════════════════════════════════════════╗
+  // ║  DOMENA za username prijavu                  ║
+  // ╚══════════════════════════════════════════════╝
+  const DOMENA = "@bascarsija.si";
+
+  // ╔══════════════════════════════════════════════╗
+  // ║  KORISNICI (dodaj/ukloni po potrebi)         ║
+  // ╚══════════════════════════════════════════════╝
+  const WHITELIST = ["katja", "ajdin", "suvad", "adnan"];
+
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+
+  function toUsername(email) { return email.split('@')[0].toLowerCase(); }
+  function toEmail(username) { return username.toLowerCase() + DOMENA; }
+
+  let currentUsername = null;
+  let saveTimer = null;
+
+  // ─── Debounced save — poziva se iz app JS svaki put kad se nešto promijeni ───
+  window._dbSave = function() {
+    if (!currentUsername) return;
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      try {
+        await setDoc(doc(db, 'korisnici', currentUsername), {
+          stavke: window.stavke,
+          stanje: window.stanje,
+          azurirano: new Date().toISOString()
+        });
+        const el = document.getElementById('save-indicator');
+        if (el) {
+          el.textContent = '✓ Sačuvano';
+          el.style.color = 'rgba(255,246,217,.5)';
+          el.style.opacity = '1';
+          clearTimeout(el._t);
+          el._t = setTimeout(() => el.style.opacity = '0', 2500);
+        }
+      } catch(e) {
+        const el = document.getElementById('save-indicator');
+        if (el) { el.textContent = '⚠ Greška'; el.style.color = '#e06060'; el.style.opacity = '1'; }
+      }
+    }, 900);
+  };
+
+  // ─── Auth state ───
+  onAuthStateChanged(auth, async (user) => {
+    if (user && WHITELIST.includes(toUsername(user.email))) {
+      currentUsername = toUsername(user.email);
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('app-wrapper').style.display  = 'block';
+      document.getElementById('app-loading').style.display  = 'flex';
+      const badge = document.getElementById('user-badge');
+      if (badge) badge.textContent = currentUsername;
+
+      try {
+        const snap = await getDoc(doc(db, 'korisnici', currentUsername));
+        if (snap.exists() && snap.data().stavke && snap.data().stavke.length > 0) {
+          const d = snap.data();
+          window._loadUserData(d.stavke, d.stanje || {});
+        } else {
+          // Prvi login — inicijalizuj s default kopijom i odmah sačuvaj
+          window._initDefaultData();
+          await setDoc(doc(db, 'korisnici', currentUsername), {
+            stavke: window.stavke, stanje: window.stanje,
+            azurirano: new Date().toISOString()
+          });
+        }
+      } catch(e) {
+        console.error('Firestore greška:', e);
+        window._initDefaultData();
+      }
+      document.getElementById('app-loading').style.display = 'none';
+
+    } else {
+      if (user) { signOut(auth); showLoginError('Pristup nije dozvoljen za ovaj nalog.'); }
+      currentUsername = null;
+      document.getElementById('login-screen').style.display = 'flex';
+      document.getElementById('app-wrapper').style.display  = 'none';
+    }
+  });
+
+  // ─── Login ───
+  window.handleLogin = async function(e) {
+    e && e.preventDefault();
+    const raw  = document.getElementById('login-username').value.trim().toLowerCase();
+    const pass = document.getElementById('login-password').value;
+    if (!raw || !pass) { showLoginError('Unesite korisničko ime i lozinku.'); return; }
+    const btn = document.getElementById('login-btn');
+    const sp  = document.getElementById('login-spinner');
+    btn.disabled = true; sp.style.display = 'inline-block';
+    document.getElementById('login-error').style.display = 'none';
+    try {
+      await signInWithEmailAndPassword(auth, toEmail(raw), pass);
+    } catch (err) {
+      const msgs = {
+        'auth/user-not-found':    'Korisničko ime nije pronađeno.',
+        'auth/wrong-password':    'Pogrešna lozinka.',
+        'auth/invalid-credential':'Pogrešno korisničko ime ili lozinka.',
+        'auth/too-many-requests': 'Previše pokušaja. Pokušajte kasnije.',
+      };
+      showLoginError(msgs[err.code] || 'Greška pri prijavi.');
+    } finally { btn.disabled = false; sp.style.display = 'none'; }
+  };
+
+  window.handleLogout = async function() { await signOut(auth); };
+
+  function showLoginError(msg) {
+    const el = document.getElementById('login-error');
+    if (!el) return;
+    el.textContent = msg; el.style.display = 'block';
+    el.style.animation = 'none'; el.offsetHeight;
+    el.style.animation = 'shake .35s ease';
+  }
+</script>
+
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --white:   #FEFEFA;
+  --beige:   #FFF6D9;
+  --beige2:  #F5E8C0;
+  --beige3:  #E8D49A;
+  --brown:   #332823;
+  --brown2:  #5a3e30;
+  --brown3:  #8a6850;
+  --green:   #004428;
+  --green2:  #005c36;
+  --border:  rgba(51,40,35,.15);
+  --border2: rgba(51,40,35,.08);
+  --radni:   #1060b0;
+  --vikend:  #9a2070;
+  --ok:      #004428;
+  --need:    #a02818;
+}
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Source Code Pro', monospace;
+  background: var(--beige);
+  color: var(--brown);
+  min-height: 100vh;
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--beige2); }
+::-webkit-scrollbar-thumb { background: var(--brown3); border-radius: 3px; }
+
+/* ═══ HEADER ═══ */
+#header {
+  background: var(--brown);
+  border-bottom: 3px solid var(--green);
+  padding: 0 36px;
+  display: flex; align-items: stretch;
+  justify-content: space-between; flex-wrap: wrap;
+}
+#hdr-left {
+  display: flex; align-items: center; gap: 18px; padding: 12px 0;
+}
+#hdr-logo {
+  flex-shrink: 0;
+}
+#hdr-divider {
+  width: 1px; background: rgba(255,246,217,.18);
+  align-self: stretch; margin: 10px 0;
+}
+#hdr-title h1 {
+  font-family: 'Sanchez', serif;
+  font-size: 20px; color: var(--beige);
+  letter-spacing: 0.5px; line-height: 1.15;
+}
+#hdr-title .sub {
+  font-size: 8.5px; color: rgba(255,246,217,.4);
+  letter-spacing: 3px; text-transform: uppercase; margin-top: 3px;
+}
+#hdr-right {
+  display: flex; align-items: center;
+  gap: 12px; padding: 12px 0; flex-wrap: wrap;
+}
+#period-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 13px; font-size: 10px;
+  letter-spacing: 2px; text-transform: uppercase;
+  border-radius: 2px; transition: all .3s;
+}
+#period-dot { width: 6px; height: 6px; border-radius: 50%; }
+#date-input {
+  background: rgba(255,246,217,.1);
+  border: 1px solid rgba(255,246,217,.22);
+  color: var(--beige);
+  padding: 6px 12px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 12px; outline: none; cursor: pointer;
+}
+#date-input::-webkit-calendar-picker-indicator {
+  filter: invert(1) opacity(.5);
+}
+
+/* ═══ TABS ═══ */
+#tabs {
+  background: var(--green);
+  padding: 0 36px; display: flex;
+  border-bottom: 2px solid rgba(0,68,40,.5);
+}
+.tab-btn {
+  background: transparent; border: none;
+  border-right: 1px solid rgba(255,246,217,.12);
+  color: rgba(255,246,217,.45);
+  padding: 11px 28px; cursor: pointer;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 11px; letter-spacing: 2px; text-transform: uppercase;
+  transition: all .2s;
+}
+.tab-btn:hover { color: var(--beige); background: rgba(255,246,217,.07); }
+.tab-btn.active { background: var(--beige); color: var(--green); font-weight: 700; }
+
+/* ═══ MAIN ═══ */
+#main { max-width: 1300px; margin: 0 auto; padding: 24px 36px; }
+
+/* ═══ BUTTONS ═══ */
+.btn-primary {
+  background: var(--green); color: var(--beige); border: none;
+  padding: 10px 22px;
+  font-family: 'Source Code Pro', monospace; font-size: 11px;
+  letter-spacing: 2px; text-transform: uppercase;
+  cursor: pointer; font-weight: 600; transition: all .2s;
+}
+.btn-primary:hover { background: var(--green2); transform: translateY(-1px); }
+.btn-outline {
+  background: transparent; color: var(--green);
+  border: 1.5px solid var(--green);
+  padding: 9px 20px;
+  font-family: 'Source Code Pro', monospace; font-size: 11px;
+  letter-spacing: 2px; text-transform: uppercase;
+  cursor: pointer; transition: all .2s;
+}
+.btn-outline:hover { background: rgba(0,68,40,.08); }
+.btn-del {
+  background: transparent; color: var(--need);
+  border: 1px solid rgba(160,40,24,.25);
+  padding: 3px 8px;
+  font-family: 'Source Code Pro', monospace; font-size: 10px;
+  cursor: pointer; transition: all .2s;
+}
+.btn-del:hover { background: rgba(160,40,24,.08); border-color: var(--need); }
+
+/* ═══ STATS ═══ */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(4,1fr);
+  gap: 10px; margin-bottom: 20px;
+}
+.stat-box {
+  background: var(--white); border: 1px solid var(--border);
+  border-top: 3px solid var(--brown3);
+  padding: 14px 18px; text-align: center;
+}
+.stat-val {
+  font-family: 'Sanchez', serif;
+  font-size: 26px; margin-bottom: 4px; color: var(--brown);
+}
+.stat-lbl {
+  font-size: 9px; color: var(--brown3);
+  letter-spacing: 2.5px; text-transform: uppercase;
+}
+
+/* ═══ LEGEND ═══ */
+.legend {
+  display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+  padding: 8px 14px;
+  background: var(--white); border: 1px solid var(--border2);
+  margin-bottom: 16px;
+}
+.legend-lbl { font-size: 9px; color: var(--brown3); letter-spacing: 2px; text-transform: uppercase; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+.legend-line { width: 14px; height: 2px; display: inline-block; }
+
+/* ═══ SECTION HEADER ═══ */
+.sec-header {
+  display: flex; justify-content: space-between;
+  align-items: flex-start; margin-bottom: 18px;
+  flex-wrap: wrap; gap: 12px;
+}
+.sec-title {
+  font-family: 'Sanchez', serif;
+  font-size: 20px; color: var(--brown); margin-bottom: 5px;
+}
+.sec-sub { font-size: 11px; color: var(--brown3); }
+
+/* ═══ CATEGORY ═══ */
+.cat-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.cat-bar { width: 3px; height: 18px; }
+.cat-name { font-size: 10px; letter-spacing: 3px; text-transform: uppercase; color: var(--brown2); }
+.cat-sep { flex: 1; height: 1px; background: var(--border); }
+
+/* ═══ TABLE ═══ */
+.tbl { width: 100%; border-collapse: collapse; margin-bottom: 26px; }
+.tbl th {
+  font-size: 9px; color: var(--brown3); letter-spacing: 2px;
+  text-transform: uppercase; padding: 8px 12px;
+  text-align: left; border-bottom: 1.5px solid var(--border);
+  background: var(--white); white-space: nowrap;
+}
+.tbl td {
+  padding: 7px 12px; border-bottom: 1px solid var(--border2);
+  vertical-align: middle;
+}
+.tbl tr.row-ok   { background: rgba(255,246,217,.6); }
+.tbl tr.row-ok:hover { background: var(--beige2); }
+.tbl tr.row-need { background: rgba(160,40,24,.06); }
+.tbl tr.row-need:hover { background: rgba(160,40,24,.1); }
+
+/* ═══ INPUTS ═══ */
+input[type=number]::-webkit-inner-spin-button { opacity: 1; }
+.inp-stanje {
+  background: var(--beige2); border: 1px solid var(--border);
+  color: var(--brown); padding: 5px 8px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 14px; font-weight: 600;
+  outline: none; width: 72px; text-align: center; transition: all .2s;
+}
+.inp-stanje:focus { border-color: var(--green); background: #fff; }
+.inp-min {
+  background: transparent; border: none;
+  border-bottom: 1px dashed var(--border);
+  color: var(--brown3); padding: 2px 4px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 12px; outline: none; width: 46px; text-align: center;
+}
+.inp-min:focus { border-bottom-color: var(--green); color: var(--brown); }
+.inp-min.radni  { border-bottom-color: rgba(16,96,176,.35); color: rgba(16,96,176,.7); }
+.inp-min.vikend { border-bottom-color: rgba(154,32,112,.35); color: rgba(154,32,112,.7); }
+.inp-min.aktivan {
+  border-bottom-style: solid !important;
+  border-bottom-width: 2px !important;
+  color: var(--brown) !important; font-weight: 600;
+}
+.inp-pak {
+  background: transparent; border: none;
+  border-bottom: 1px dashed var(--border);
+  color: var(--brown3); padding: 2px 4px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 12px; outline: none; width: 38px; text-align: center;
+}
+.inp-pak:focus { border-bottom-color: var(--green); color: var(--brown); }
+.field {
+  background: var(--beige2); border: 1px solid var(--border);
+  color: var(--brown); padding: 8px 12px;
+  font-family: 'Source Code Pro', monospace; font-size: 13px;
+  outline: none; width: 100%; transition: border-color .2s;
+}
+.field:focus { border-color: var(--green); }
+select.field option { background: var(--beige2); }
+
+/* ═══ BADGE ═══ */
+.badge {
+  display: inline-block; padding: 2px 8px;
+  font-size: 9px; letter-spacing: 1.5px; text-transform: uppercase;
+}
+
+/* ═══ DOBAVLJAČ CARD ═══ */
+.dob-card {
+  background: var(--white); border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  margin-bottom: 14px;
+}
+.dob-card.sent {
+  background: rgba(0,68,40,.04);
+  border-color: rgba(0,68,40,.3);
+  border-left-color: var(--green);
+}
+.dob-head {
+  background: var(--beige2); padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex; justify-content: space-between;
+  align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.dob-name {
+  font-family: 'Sanchez', serif; font-size: 16px; color: var(--brown);
+}
+.dob-email { font-size: 11px; color: var(--brown3); }
+.dob-body { padding: 20px; }
+.dob-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.preview-box {
+  background: var(--beige); border: 1px solid var(--border2); padding: 14px;
+}
+.preview-title {
+  font-size: 9px; color: var(--brown3);
+  letter-spacing: 3px; text-transform: uppercase; margin-bottom: 10px;
+}
+.preview-text {
+  font-family: 'Source Code Pro', monospace;
+  font-size: 11px; color: var(--brown);
+  white-space: pre-wrap; line-height: 1.7;
+}
+.email-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.sent-tag {
+  background: rgba(0,68,40,.1); color: var(--green);
+  border: 1px solid rgba(0,68,40,.2);
+  padding: 4px 12px; font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+}
+
+/* ═══ MODAL ═══ */
+.modal-bg {
+  position: fixed; inset: 0;
+  background: rgba(51,40,35,.6); backdrop-filter: blur(4px);
+  display: flex; align-items: center; justify-content: center; z-index: 100;
+}
+.modal-bg.hidden { display: none; }
+.modal-box {
+  background: var(--white); border: 1px solid var(--border);
+  border-top: 3px solid var(--green);
+  width: 480px; max-width: 96vw; max-height: 90vh;
+  overflow-y: auto; padding: 28px 30px;
+}
+.modal-title {
+  font-family: 'Sanchez', serif; font-size: 18px;
+  color: var(--brown); margin-bottom: 22px;
+}
+.form-row { margin-bottom: 16px; }
+.form-label {
+  display: block; font-size: 9px; color: var(--brown3);
+  letter-spacing: 2px; text-transform: uppercase; margin-bottom: 6px;
+}
+.form-hint { font-size: 10px; color: var(--brown3); margin-top: 4px; }
+.modal-footer {
+  display: flex; justify-content: flex-end;
+  gap: 10px; margin-top: 24px; padding-top: 18px;
+  border-top: 1px solid var(--border2);
+}
+
+/* ═══ GAJBA INFO ═══ */
+.gajba-info { font-weight: 600; font-size: 13px; }
+.gajba-sub {
+  font-size: 10px; color: var(--brown3); font-weight: 400;
+  margin-left: 6px;
+}
+
+/* ═══ ORNAMENT DIVIDER ═══ */
+.orn-sep {
+  display: flex; align-items: center; gap: 12px;
+  margin: 6px 0 20px;
+}
+.orn-sep-line { flex: 1; height: 1px; background: var(--border); }
+.orn-sep svg { opacity: .35; }
+
+/* ═══ LOGIN SCREEN ═══ */
+#login-screen {
+  position: fixed; inset: 0; z-index: 9999;
+  background: var(--brown);
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Source Code Pro', monospace;
+}
+#login-screen::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 39px,
+    rgba(255,246,217,.03) 39px,
+    rgba(255,246,217,.03) 40px
+  );
+  pointer-events: none;
+}
+.login-card {
+  width: 380px; max-width: 94vw;
+  background: var(--beige);
+  border-top: 4px solid var(--green);
+  border-bottom: 1px solid var(--beige3);
+  padding: 40px 36px 36px;
+  position: relative;
+  box-shadow: 0 32px 80px rgba(0,0,0,.5);
+}
+.login-logo-wrap {
+  display: flex; justify-content: center; margin-bottom: 28px;
+}
+.login-title {
+  font-family: 'Sanchez', serif;
+  font-size: 22px; color: var(--brown);
+  text-align: center; margin-bottom: 4px;
+}
+.login-sub {
+  font-size: 9px; color: var(--brown3);
+  letter-spacing: 3px; text-transform: uppercase;
+  text-align: center; margin-bottom: 32px;
+}
+.login-label {
+  display: block; font-size: 9px;
+  color: var(--brown3); letter-spacing: 2.5px;
+  text-transform: uppercase; margin-bottom: 7px;
+}
+.login-input {
+  width: 100%; background: var(--white);
+  border: 1.5px solid var(--border);
+  color: var(--brown); padding: 10px 14px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 13px; outline: none;
+  transition: border-color .2s, box-shadow .2s;
+  margin-bottom: 18px;
+}
+.login-input:focus {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px rgba(0,68,40,.1);
+}
+.login-input::placeholder { color: var(--beige3); }
+.login-btn {
+  width: 100%; background: var(--green); color: var(--beige);
+  border: none; padding: 12px 22px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 11px; letter-spacing: 2.5px; text-transform: uppercase;
+  font-weight: 600; cursor: pointer;
+  transition: background .2s, transform .15s;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin-top: 6px;
+}
+.login-btn:hover:not(:disabled) { background: var(--green2); transform: translateY(-1px); }
+.login-btn:disabled { opacity: .65; cursor: not-allowed; transform: none; }
+.login-error {
+  display: none;
+  background: rgba(160,40,24,.08);
+  border: 1px solid rgba(160,40,24,.3);
+  color: var(--need);
+  padding: 9px 13px; margin-top: 14px;
+  font-size: 11px; letter-spacing: .3px;
+}
+.login-footer {
+  margin-top: 28px; padding-top: 18px;
+  border-top: 1px solid var(--border2);
+  text-align: center;
+  font-size: 9px; color: var(--brown3);
+  letter-spacing: 1.5px; text-transform: uppercase;
+}
+@keyframes shake {
+  0%,100%{transform:translateX(0)}
+  25%{transform:translateX(-6px)}
+  75%{transform:translateX(6px)}
+}
+.login-spinner {
+  display: none;
+  width: 12px; height: 12px;
+  border: 2px solid rgba(255,246,217,.3);
+  border-top-color: var(--beige);
+  border-radius: 50%;
+  animation: spin .7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ═══ USER BADGE IN HEADER ═══ */
+#user-info {
+  display: flex; align-items: center; gap: 10px;
+}
+#user-badge {
+  font-size: 10px; color: rgba(255,246,217,.5);
+  letter-spacing: 1px; max-width: 180px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#logout-btn {
+  background: transparent;
+  border: 1px solid rgba(255,246,217,.2);
+  color: rgba(255,246,217,.55);
+  padding: 5px 12px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+  cursor: pointer; transition: all .2s;
+}
+#logout-btn:hover {
+  border-color: rgba(255,246,217,.5);
+  color: var(--beige); background: rgba(255,246,217,.07);
+}
+/* ═══ PWA INSTALL BUTTON ═══ */
+#pwa-install-btn {
+  display: none;
+  background: rgba(255,246,217,.1);
+  border: 1px solid rgba(255,246,217,.22);
+  color: rgba(255,246,217,.7);
+  padding: 5px 13px;
+  font-family: 'Source Code Pro', monospace;
+  font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+  cursor: pointer; transition: all .2s; white-space: nowrap;
+}
+#pwa-install-btn:hover {
+  background: rgba(255,246,217,.18);
+  color: var(--beige);
+  border-color: rgba(255,246,217,.45);
+}
+
+/* ═══ APP LOADING OVERLAY ═══ */
+#app-loading {
+  position: fixed; inset: 0; z-index: 9000;
+  background: rgba(51,40,35,.75); backdrop-filter: blur(4px);
+  display: none; align-items: center; justify-content: center;
+  flex-direction: column; gap: 16px;
+}
+.loading-spinner {
+  width: 36px; height: 36px;
+  border: 3px solid rgba(255,246,217,.15);
+  border-top-color: var(--beige);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+.loading-text {
+  font-size: 10px; color: rgba(255,246,217,.5);
+  letter-spacing: 3px; text-transform: uppercase;
+}
+#save-indicator {
+  font-size: 9px; letter-spacing: 2px;
+  text-transform: uppercase; opacity: 0;
+  transition: opacity .4s;
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════ LOGIN SCREEN ═══════════════════════════════ -->
+<div id="login-screen" style="display:flex;">
+  <div class="login-card">
+    <div class="login-logo-wrap">
+      <!-- Logo SVG -->
+      <svg width="52" height="52" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="52" height="52" fill="#004428"/>
+        <path d="M10 38 L26 14 L42 38" stroke="#FFF6D9" stroke-width="2.2" fill="none" stroke-linejoin="round"/>
+        <path d="M16 30 L36 30" stroke="#FFF6D9" stroke-width="1.4"/>
+        <circle cx="26" cy="14" r="2.5" fill="#FFF6D9"/>
+        <rect x="23" y="38" width="6" height="4" fill="#FFF6D9" opacity=".4"/>
+      </svg>
+    </div>
+    <div class="login-title">Baščaršija</div>
+    <div class="login-sub">Sistem Narudžbina · Pristup</div>
+
+    <form onsubmit="handleLogin(event)">
+      <label class="login-label" for="login-username">Korisničko ime</label>
+      <input class="login-input" type="text" id="login-username"
+             placeholder="konobar" autocomplete="username"
+             autocapitalize="none" autocorrect="off" spellcheck="false" required>
+
+      <label class="login-label" for="login-password">Lozinka</label>
+      <input class="login-input" type="password" id="login-password"
+             placeholder="••••••••" autocomplete="current-password" required>
+
+      <button class="login-btn" type="submit" id="login-btn">
+        <span class="login-spinner" id="login-spinner"></span>
+        Prijavi Se
+      </button>
+    </form>
+
+    <div class="login-error" id="login-error"></div>
+
+    <div class="login-footer">Baščaršija d.o.o. · Interni sistem</div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════ APP LOADING ═══════════════════════════════ -->
+<div id="app-loading">
+  <div class="loading-spinner"></div>
+  <div class="loading-text">Učitavanje podataka…</div>
+</div>
+
+<!-- ═══════════════════════════════ APP WRAPPER ═══════════════════════════════ -->
+<div id="app-wrapper" style="display:none;">
+
+<!-- ═══════════════════════════════ HEADER ═══════════════════════════════ -->
+<div id="header">
+  <div id="hdr-left">
+    <!-- SVG Logo -->
+    <div id="hdr-logo">
+      <img src="data:image/png;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/4gHYSUNDX1BST0ZJTEUAAQEAAAHIAAAAAAQwAABtbnRyUkdCIFhZWiAH4AABAAEAAAAAAABhY3NwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAA9tYAAQAAAADTLQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAlkZXNjAAAA8AAAACRyWFlaAAABFAAAABRnWFlaAAABKAAAABRiWFlaAAABPAAAABR3dHB0AAABUAAAABRyVFJDAAABZAAAAChnVFJDAAABZAAAAChiVFJDAAABZAAAAChjcHJ0AAABjAAAADxtbHVjAAAAAAAAAAEAAAAMZW5VUwAAAAgAAAAcAHMAUgBHAEJYWVogAAAAAAAAb6IAADj1AAADkFhZWiAAAAAAAABimQAAt4UAABjaWFlaIAAAAAAAACSgAAAPhAAAts9YWVogAAAAAAAA9tYAAQAAAADTLXBhcmEAAAAAAAQAAAACZmYAAPKnAAANWQAAE9AAAApbAAAAAAAAAABtbHVjAAAAAAAAAAEAAAAMZW5VUwAAACAAAAAcAEcAbwBvAGcAbABlACAASQBuAGMALgAgADIAMAAxADb/2wBDAAUDBAQEAwUEBAQFBQUGBwwIBwcHBw8LCwkMEQ8SEhEPERETFhwXExQaFRERGCEYGh0dHx8fExciJCIeJBweHx7/2wBDAQUFBQcGBw4ICA4eFBEUHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh7/wAARCAfQB9ADASIAAhEBAxEB/8QAHQABAAICAwEBAAAAAAAAAAAAAAEIBgcEBQkCA//EAFMQAQABAwMBAwcHCAgEBAMIAwABAgMEBQYRBwghMRITQVFhcYEUFSKRlKHRGCMyQlJWk7EWU1RVYnKSwTNDgqIkc7LSFzVjNDZFRmR0wvCDhKP/xAAaAQEAAgMBAAAAAAAAAAAAAAAAAQIDBQYE/8QAMhEBAAIBAgUDAgUEAwADAAAAAAECAwQRBRIhMUETUWEVkSIycbHhI0KBoVLR8BQzQ//aAAwDAQACEQMRAD8AruA87jwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA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AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/9k=" alt="Baščaršija Logo" style="width:48px;height:48px;object-fit:cover;border-radius:6px;">
+    </div>
+    <div id="hdr-divider"></div>
+    <div id="hdr-title">
+      <h1>Etno Hiša Baščaršija</h1>
+      <div class="sub">Sistem Narudžbina · Interno Orodje</div>
+    </div>
+  </div>
+  <div id="hdr-right">
+    <div id="user-info">
+      <span id="save-indicator"></span>
+      <button id="pwa-install-btn" onclick="pwaInstall()">⬇ Instaliraj App</button>
+      <span id="user-badge"></span>
+      <button id="logout-btn" onclick="handleLogout()">Odjava</button>
+    </div>
+    <div id="period-pill">
+      <span id="period-dot"></span>
+      <span id="period-txt"></span>
+    </div>
+    <input type="date" id="date-input">
+  </div>
+</div>
+
+<!-- ═══════════════════════════════ TABS ═══════════════════════════════ -->
+<div id="tabs">
+  <button class="tab-btn active" id="tab1" onclick="showKorak(1)">1 · Popis Zalog</button>
+  <button class="tab-btn"        id="tab2" onclick="showKorak(2)">2 · Pregled Narudžbine</button>
+  <button class="tab-btn"        id="tab3" onclick="showKorak(3)">3 · Pošalji Dobavljačima</button>
+</div>
+
+<!-- ═══════════════════════════════ MAIN ═══════════════════════════════ -->
+<div id="main">
+
+  <!-- KORAK 1 -->
+  <div id="page1">
+    <div class="sec-header">
+      <div>
+        <div class="sec-title">Unos Trenutnog Stanja</div>
+        <div class="sec-sub" id="k1-sub">Unesite fizičko stanje zaliha s popisa.</div>
+      </div>
+      <div style="display:flex;gap:10px;">
+        <button class="btn-outline" onclick="openModal()">+ Dodaj Stavku</button>
+        <button class="btn-primary" onclick="showKorak(2)">Izračunaj Narudžbinu →</button>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span class="legend-lbl">Minimalne zalihe:</span>
+      <span class="legend-item"><span class="legend-line" style="background:var(--radni)"></span><span style="color:var(--radni)">Pon–Pet (radni dan)</span></span>
+      <span class="legend-item"><span class="legend-line" style="background:var(--vikend)"></span><span style="color:var(--vikend)">Pet–Ned (vikend)</span></span>
+      <span style="font-size:10px;color:var(--brown3);">Aktivni period je <span id="legend-aktivan" style="font-weight:600;">podvučen</span> · kliknite vrednost za izmenu</span>
+    </div>
+
+    <div class="stats-grid" id="stats-grid"></div>
+    <div id="tables-container"></div>
+
+    <div style="display:flex;justify-content:flex-end;margin-top:16px;">
+      <button class="btn-primary" onclick="showKorak(2)" id="btn-k1-next">Pregledaj Narudžbinu (0) →</button>
+    </div>
+  </div>
+
+  <!-- KORAK 2 -->
+  <div id="page2" style="display:none;">
+    <div class="sec-header">
+      <div>
+        <div class="sec-title">Pregled Narudžbine</div>
+        <div class="sec-sub" id="k2-sub"></div>
+      </div>
+      <div style="display:flex;gap:10px;">
+        <button class="btn-outline" onclick="showKorak(1)">← Nazad</button>
+        <button class="btn-primary" onclick="showKorak(3)">Pošalji Emailove →</button>
+      </div>
+    </div>
+    <div id="pregled-container"></div>
+  </div>
+
+  <!-- KORAK 3 -->
+  <div id="page3" style="display:none;">
+    <div class="sec-header">
+      <div>
+        <div class="sec-title">Slanje Narudžbina Dobavljačima</div>
+        <div class="sec-sub" id="k3-sub"></div>
+      </div>
+      <button class="btn-outline" onclick="showKorak(2)">← Nazad</button>
+    </div>
+    <div class="stats-grid" id="email-stats"></div>
+    <div id="email-container"></div>
+  </div>
+
+</div>
+
+<!-- ═══════════════════════════════ MODAL ═══════════════════════════════ -->
+<div class="modal-bg hidden" id="modal" onclick="if(event.target===this)closeModal()">
+  <div class="modal-box">
+    <div class="modal-title" id="modal-title">Dodaj Novu Stavku</div>
+
+    <div class="form-row">
+      <label class="form-label">Naziv Artikla</label>
+      <input class="field" type="text" id="m-naziv" placeholder="npr. Laško 0,5L kos">
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+      <div class="form-row">
+        <label class="form-label">Kategorija</label>
+        <select class="field" id="m-kat"></select>
+      </div>
+      <div class="form-row">
+        <label class="form-label">Jedinica mere</label>
+        <select class="field" id="m-jed">
+          <option>kos</option><option>pak</option><option>kg</option><option>L</option>
+          <option>rol</option><option>sod</option><option>kos</option>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <label class="form-label">Pakovanje (naručuje se u višekratnicima)</label>
+      <input class="field" type="number" id="m-pak" value="1" min="1">
+      <div class="form-hint" id="m-pak-hint"></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;">
+      <div class="form-row">
+        <label class="form-label" style="color:var(--radni)">Min. Pon–Pet</label>
+        <input class="field" type="number" id="m-minR" value="0" min="0">
+      </div>
+      <div class="form-row">
+        <label class="form-label" style="color:var(--vikend)">Min. Pet–Ned</label>
+        <input class="field" type="number" id="m-minV" value="0" min="0">
+      </div>
+    </div>
+    <div class="form-row">
+      <label class="form-label">Dobavljač</label>
+      <select class="field" id="m-dob"></select>
+    </div>
+
+    <div class="modal-footer">
+      <button class="btn-outline" onclick="closeModal()">Otkaži</button>
+      <button class="btn-primary" id="modal-save-btn" onclick="saveModal()">Dodaj Stavku</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  DATA
+// ═══════════════════════════════════════════════════════
+const DOBAVLJACI = [
+  { id:1,  naziv:"ALAMBIK",     email:"miro.jankovic@alambik.si",    boja:"#7a4010" },
+  { id:2,  naziv:"EVINO",       email:"info@evino.si",                boja:"#5a2880" },
+  { id:3,  naziv:"FREŠER",      email:"vino@freser.si",               boja:"#004428" },
+  { id:4,  naziv:"METLIKA",     email:"prodaja-mb@kz-metlika.si",     boja:"#1060b0" },
+  { id:5,  naziv:"VINAKOPER",   email:"danilo.soster@vinakoper.si",   boja:"#702890" },
+  { id:6,  naziv:"LJ MLEKARNE", email:"narocila.mb@l-m.si",           boja:"#106880" },
+  { id:7,  naziv:"KVIBO",       email:"kc@kvibo.si",                  boja:"#b05010" },
+  { id:8,  naziv:"ENGROTUŠ",    email:"damir.hodzic@tus.si",          boja:"#a02818" },
+  { id:9,  naziv:"BEVANN",      email:"narocila@bevann.si",           boja:"#a01870" },
+  { id:10, naziv:"BARJANS",     email:"narocila@barjans.si",          boja:"#486010" },
+  { id:11, naziv:"PROSUPPLY",   email:"info@prosupply.si",            boja:"#405060" },
+  { id:12, naziv:"INGLES DOO",  email:"komerciala1@drva.info",        boja:"#6a4830" },
+];
+
+const KAT_BOJE = {
+  "Bezalkoholna":"#106880","Pivo":"#7a4010","Vino":"#5a2880",
+  "Žestoka pića":"#a02818","Hrana":"#b05010","Potrošni materijal":"#486010"
+};
+
+const DEFAULT_STAVKE = [
+  { id:1,   naziv:"Borovničevec (0,7L)",                                          kat:"Žestoka pića",      jed:"kos", pak:1,    minR:1,   minV:2,   dobId:1 },
+  { id:2,   naziv:"Dunja FINA (0,7L)",                                            kat:"Žestoka pića",      jed:"kos", pak:1,    minR:6,   minV:12,  dobId:1 },
+  { id:3,   naziv:"Kajsija FINA (0,7L)",                                          kat:"Žestoka pića",      jed:"kos", pak:1,    minR:3,   minV:6,   dobId:1 },
+  { id:4,   naziv:"Pelinkovec Druid (0,7L kos)",                                  kat:"Žestoka pića",      jed:"kos", pak:1,    minR:1,   minV:2,   dobId:1 },
+  { id:5,   naziv:"Slivovka FINA (0,7L)",                                         kat:"Žestoka pića",      jed:"kos", pak:1,    minR:4,   minV:6,   dobId:1 },
+  { id:6,   naziv:"Slivovka ISKRENA (0,7L)",                                      kat:"Žestoka pića",      jed:"kos", pak:1,    minR:1,   minV:2,   dobId:1 },
+  { id:7,   naziv:"Travarica (1,0L)",                                              kat:"Žestoka pića",      jed:"kos", pak:1,    minR:1,   minV:1,   dobId:1 },
+  { id:8,   naziv:"Viljamovka FINA (0,7L)",                                       kat:"Žestoka pića",      jed:"kos", pak:1,    minR:2,   minV:4,   dobId:1 },
+  { id:9,   naziv:"Jelen svetlo (0,33L kos)",                                     kat:"Pivo",              jed:"kos", pak:24,   minR:0,   minV:0,   dobId:1 },
+  { id:10,  naziv:"Nikšičko (0,33L kos)",                                         kat:"Pivo",              jed:"kos", pak:24,   minR:0,   minV:0,   dobId:1 },
+  { id:11,  naziv:"Pitars Prosecco, doc brut (0,75 l)",                           kat:"Vino",              jed:"kos", pak:6,    minR:4,   minV:6,   dobId:2 },
+  { id:12,  naziv:"Blatina Škegro Krš (0,75L kos)",                              kat:"Vino",              jed:"kos", pak:6,    minR:2,   minV:6,   dobId:2 },
+  { id:13,  naziv:"Žilavka Škegro Krš (0,75L kos)",                              kat:"Vino",              jed:"kos", pak:6,    minR:2,   minV:6,   dobId:2 },
+  { id:14,  naziv:"Bjana Brut (0,75L kos)",                                       kat:"Vino",              jed:"kos", pak:6,    minR:2,   minV:2,   dobId:2 },
+  { id:15,  naziv:"ROSE COLNAR 0,75 L kos",                                       kat:"Vino",              jed:"kos", pak:6,    minR:2,   minV:4,   dobId:2 },
+  { id:16,  naziv:"Hišno vino, Ritoznojčan (1 L kos)",                           kat:"Vino",              jed:"kos", pak:6,    minR:18,  minV:42,  dobId:3 },
+  { id:17,  naziv:"Sarajevsko PREMIUM (0,50L kos)",                               kat:"Pivo",              jed:"kos", pak:24,   minR:88,  minV:110, dobId:4 },
+  { id:18,  naziv:"Sarajevsko SVIJETLO (0,33L kos)",                              kat:"Pivo",              jed:"kos", pak:24,   minR:48,  minV:48,  dobId:4 },
+  { id:19,  naziv:"Točeno pivo Union (sod=25L)",                                  kat:"Pivo",              jed:"sod", pak:1,    minR:4,   minV:6,   dobId:4 },
+  { id:20,  naziv:"Aperol (1L kos)",                                               kat:"Žestoka pića",      jed:"kos", pak:6,    minR:0,   minV:1,   dobId:4 },
+  { id:21,  naziv:"Cockta (0,275L kos)",                                           kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:72,  minV:72,  dobId:4 },
+  { id:22,  naziv:"Cviček Krško (1L kos)",                                        kat:"Vino",              jed:"kos", pak:6,    minR:2,   minV:6,   dobId:4 },
+  { id:23,  naziv:"Fructal breskev (0,20L kos)",                                  kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:24,  dobId:4 },
+  { id:24,  naziv:"Fructal jabolko (0,20L kos)",                                  kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:24,  dobId:4 },
+  { id:25,  naziv:"Fructal pomaranča (0,20L kos)",                                kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:24,  dobId:4 },
+  { id:26,  naziv:"Gin Bombay (1,0L kos)",                                        kat:"Žestoka pića",      jed:"kos", pak:6,    minR:0,   minV:1,   dobId:4 },
+  { id:27,  naziv:"Jack Daniel's (1L kos)",                                       kat:"Žestoka pića",      jed:"kos", pak:6,    minR:1,   minV:1,   dobId:4 },
+  { id:28,  naziv:"INKA Tonic (0,25L kos)",                                       kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:24,  dobId:4 },
+  { id:29,  naziv:"Jagermeister (1L kos)",                                        kat:"Žestoka pića",      jed:"kos", pak:6,    minR:1,   minV:1,   dobId:4 },
+  { id:30,  naziv:"Laško (0,50L kos)",                                            kat:"Pivo",              jed:"kos", pak:24,   minR:80,  minV:80,  dobId:4 },
+  { id:31,  naziv:"Ledeni čaj (0,25L kos)",                                       kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:48,  minV:72,  dobId:4 },
+  { id:32,  naziv:"Inka Bitter (0,25 L kos)",                                     kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:48,  dobId:4 },
+  { id:33,  naziv:"Ora (0,25L kos)",                                              kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:48,  dobId:4 },
+  { id:34,  naziv:"Oraketa (kos)",                                                kat:"Bezalkoholna",      jed:"kos", pak:50,   minR:50,  minV:50,  dobId:4 },
+  { id:35,  naziv:"Orangina (0,25L kos)",                                         kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:40,  minV:40,  dobId:4 },
+  { id:36,  naziv:"Pepsi (0,25L kos)",                                            kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:144, minV:240, dobId:4 },
+  { id:37,  naziv:"Pepsi Max (0,25L kos)",                                        kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:48,  minV:72,  dobId:4 },
+  { id:38,  naziv:"Prosecco Grande vento (0,75L)",                                kat:"Vino",              jed:"kos", pak:6,    minR:3,   minV:4,   dobId:4 },
+  { id:39,  naziv:"Radenska limonska trava (0,25L kos)",                          kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:24,  minV:24,  dobId:4 },
+  { id:40,  naziv:"Radenska (0,25L kos)",                                         kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:72,  minV:96,  dobId:4 },
+  { id:41,  naziv:"Radenska steklenica (1,0L kos)",                               kat:"Bezalkoholna",      jed:"kos", pak:12,   minR:36,  minV:72,  dobId:4 },
+  { id:42,  naziv:"Radler (0,50L kos)",                                           kat:"Pivo",              jed:"kos", pak:24,   minR:40,  minV:40,  dobId:4 },
+  { id:43,  naziv:"Temno Laško (0,50L kos)",                                      kat:"Pivo",              jed:"kos", pak:24,   minR:20,  minV:20,  dobId:4 },
+  { id:44,  naziv:"Uni (0,50L kos)",                                              kat:"Bezalkoholna",      jed:"kos", pak:24,   minR:40,  minV:40,  dobId:4 },
+  { id:45,  naziv:"Heineken svetlo (0,33 L kos)",                                 kat:"Pivo",              jed:"kos", pak:24,   minR:0,   minV:0,   dobId:4 },
+  { id:46,  naziv:"Laško Malt - šipek in limona (0,33L kos)",                    kat:"Pivo",              jed:"kos", pak:24,   minR:0,   minV:0,   dobId:4 },
+  { id:47,  naziv:"Voda Naturelle stekl. (0,50L kos)",                            kat:"Bezalkoholna",      jed:"kos", pak:12,   minR:45,  minV:45,  dobId:4 },
+  { id:48,  naziv:"Voda z okusom OAZA breskev (0,50L kos)",                       kat:"Bezalkoholna",      jed:"kos", pak:12,   minR:24,  minV:36,  dobId:4 },
+  { id:49,  naziv:"Capris Cabernet (0,75L kos)",                                  kat:"Vino",              jed:"kos", pak:6,    minR:6,   minV:12,  dobId:5 },
+  { id:50,  naziv:"Capris Merlot (0,75L kos)",                                   kat:"Vino",              jed:"kos", pak:6,    minR:3,   minV:6,   dobId:5 },
+  { id:51,  naziv:"Malvazija Gourmet (0,75L kos)",                               kat:"Vino",              jed:"kos", pak:6,    minR:6,   minV:12,  dobId:5 },
+  { id:52,  naziv:"Capris Refošk (0,75 L kos)",                                  kat:"Vino",              jed:"kos", pak:6,    minR:6,   minV:6,   dobId:5 },
+  { id:53,  naziv:"Sladki muškat (0,75L kos)",                                   kat:"Vino",              jed:"kos", pak:6,    minR:2,   minV:6,   dobId:5 },
+  { id:54,  naziv:"Kajmak (500g kos)",                                            kat:"Hrana",             jed:"kos", pak:1,    minR:64,  minV:84,  dobId:6 },
+  { id:55,  naziv:"Sir slani ARLE (4kg kos)",                                     kat:"Hrana",             jed:"kos", pak:1,    minR:4,   minV:7,   dobId:6 },
+  { id:56,  naziv:"Jogurt (lit = kos)",                                           kat:"Hrana",             jed:"kos", pak:1,    minR:12,  minV:12,  dobId:6 },
+  { id:57,  naziv:"Mleko Berti (L)",                                              kat:"Hrana",             jed:"kos", pak:1,    minR:12,  minV:12,  dobId:6 },
+  { id:58,  naziv:"Smetana stepena (250ml kos)",                                  kat:"Hrana",             jed:"kos", pak:1,    minR:6,   minV:12,  dobId:6 },
+  { id:59,  naziv:"Maslo Mu Cuisine (kos=250g)",                                  kat:"Hrana",             jed:"kos", pak:1,    minR:0,   minV:0,   dobId:6 },
+  { id:60,  naziv:"Kisla smetana 18% Mu Cuisine (kos=180g)",                      kat:"Hrana",             jed:"kos", pak:1,    minR:0,   minV:0,   dobId:6 },
+  { id:61,  naziv:"Sladoled vanilija (4,3L kos)",                                 kat:"Hrana",             jed:"kos", pak:1,    minR:0,   minV:0,   dobId:6 },
+  { id:62,  naziv:"Palmino olje (20L kos)",                                       kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:7 },
+  { id:63,  naziv:"Pomfri (kg)",                                                  kat:"Hrana",             jed:"kg",  pak:1,    minR:35,  minV:45,  dobId:7 },
+  { id:64,  naziv:"Moka t-500 Mlinotest (pak=5kg)",                               kat:"Hrana",             jed:"kos", pak:5,    minR:4,   minV:4,   dobId:8 },
+  { id:65,  naziv:"PECILNI PRAŠEK TUŠ 5/1 (pak=5x13g)",                          kat:"Hrana",             jed:"kos", pak:5,    minR:6,   minV:8,   dobId:8 },
+  { id:66,  naziv:"SLADKOR TUŠ (kom=1kg)",                                        kat:"Hrana",             jed:"kos", pak:1,    minR:4,   minV:2,   dobId:8 },
+  { id:67,  naziv:"MED MEDEX CVETLIČNI TOČ.(pak=80 kos)",                         kat:"Hrana",             jed:"kos", pak:80,   minR:1,   minV:1,   dobId:8 },
+  { id:68,  naziv:"SLADKOR AGRAGOLD KOCKE",                                       kat:"Hrana",             jed:"kos", pak:1,    minR:1,   minV:1,   dobId:8 },
+  { id:69,  naziv:"RATLUK OKUS VRTNICA 200G",                                     kat:"Hrana",             jed:"kos", pak:1,    minR:9,   minV:9,   dobId:8 },
+  { id:70,  naziv:"POPER ČRNI MLETI",                                             kat:"Hrana",             jed:"kos", pak:1,    minR:1,   minV:1,   dobId:8 },
+  { id:71,  naziv:"POPER BELI MLETI SUŠENI",                                      kat:"Hrana",             jed:"kos", pak:1,    minR:1,   minV:1,   dobId:8 },
+  { id:72,  naziv:"ROŽMARIN LISTI SUŠENI",                                        kat:"Hrana",             jed:"kos", pak:1,    minR:1,   minV:1,   dobId:8 },
+  { id:73,  naziv:"MEŠ.ZAČIMB OKUSKO TUŠ (kos=1kg)",                             kat:"Hrana",             jed:"kos", pak:1,    minR:4,   minV:4,   dobId:8 },
+  { id:74,  naziv:"DROBTINE KRUŠNE POLBELE",                                      kat:"Hrana",             jed:"kos", pak:1,    minR:10,  minV:8,   dobId:8 },
+  { id:75,  naziv:"POLENTA ZLATO POLJE INST. (pak= 5 kg)",                        kat:"Hrana",             jed:"kos", pak:5,    minR:1,   minV:1,   dobId:8 },
+  { id:76,  naziv:"OLJE BUČNO PETOVAR (0,5 L)",                                   kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:8 },
+  { id:77,  naziv:"KIS TUŠ JABOLČNI 5%",                                          kat:"Hrana",             jed:"kos", pak:1,    minR:6,   minV:6,   dobId:8 },
+  { id:78,  naziv:"PONTI BALZ. KIS IZ MODENE",                                    kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:8 },
+  { id:79,  naziv:"OLJE GEA OLJČNO (0,5 L)",                                      kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:8 },
+  { id:80,  naziv:"SOL TUZLA KRT.",                                                kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:8 },
+  { id:81,  naziv:"KETCHUP FELIX BLAGI",                                           kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:8 },
+  { id:82,  naziv:"MOKA MLINOTEST KORUZNA",                                        kat:"Hrana",             jed:"kos", pak:1,    minR:1,   minV:1,   dobId:8 },
+  { id:83,  naziv:"GORČICA TUŠ",                                                   kat:"Hrana",             jed:"kos", pak:1,    minR:3,   minV:3,   dobId:8 },
+  { id:84,  naziv:"MAJONEZA TUŠ KOZAREC",                                          kat:"Hrana",             jed:"kos", pak:1,    minR:6,   minV:4,   dobId:8 },
+  { id:85,  naziv:"Cedevita vin limona (0,9 kg)",                                  kat:"Hrana",             jed:"kos", pak:1,    minR:4,   minV:2,   dobId:8 },
+  { id:86,  naziv:"ČAJ MENTA (20 kos)",                                            kat:"Hrana",             jed:"kos", pak:1,    minR:2,   minV:2,   dobId:8 },
+  { id:87,  naziv:"ČAJ GOZDNI SADEŽ (20 kos)",                                    kat:"Hrana",             jed:"kos", pak:1,    minR:2,   minV:2,   dobId:8 },
+  { id:88,  naziv:"ČAJ PRAVI ZELENI (20 kos)",                                    kat:"Hrana",             jed:"kos", pak:1,    minR:2,   minV:2,   dobId:8 },
+  { id:89,  naziv:"TUŠ SONČNIČNO OLJE 1L",                                        kat:"Hrana",             jed:"kos", pak:1,    minR:36,  minV:36,  dobId:8 },
+  { id:90,  naziv:"Min. voda Radenska classic 1,5 L",                              kat:"Hrana",             jed:"kos", pak:1,    minR:6,   minV:6,   dobId:8 },
+  { id:91,  naziv:"Alu folija (kos)",                                               kat:"Potrošni materijal",jed:"kos", pak:1,    minR:4,   minV:4,   dobId:9 },
+  { id:92,  naziv:"Kraft okrogla 750ml (pak=50 kos)",                               kat:"Potrošni materijal",jed:"pak", pak:50,   minR:8,   minV:8,   dobId:9 },
+  { id:93,  naziv:"Pokrov ZA TOPLE JEDI 500/750ml PP (pak=50 kos)",                kat:"Potrošni materijal",jed:"pak", pak:50,   minR:8,   minV:8,   dobId:9 },
+  { id:94,  naziv:"Posodice PP 125ml s pokrovom (50 kos)",                          kat:"Potrošni materijal",jed:"kos", pak:1,    minR:25,  minV:25,  dobId:9 },
+  { id:95,  naziv:"Emb. za plošče / lunchbox (pak=50kos)",                          kat:"Potrošni materijal",jed:"pak", pak:50,   minR:4,   minV:4,   dobId:9 },
+  { id:96,  naziv:"Kraft soup 500ml (pak=50kos)",                                    kat:"Potrošni materijal",jed:"pak", pak:50,   minR:4,   minV:4,   dobId:9 },
+  { id:97,  naziv:"Pokrov PP 115mm soup (pak=100 kos)",                             kat:"Potrošni materijal",jed:"pak", pak:100,  minR:2,   minV:2,   dobId:9 },
+  { id:98,  naziv:"Serviete 33x33 (pak=50kos)",                                     kat:"Potrošni materijal",jed:"pak", pak:50,   minR:3,   minV:3,   dobId:9 },
+  { id:99,  naziv:"NABODALA za ražnjiče STANDARD 20cm (pak=200 kos)",              kat:"Potrošni materijal",jed:"pak", pak:200,  minR:2,   minV:2,   dobId:9 },
+  { id:100, naziv:"SLAMICE ČRNE 21x0,8cm (pak=500 kos)",                           kat:"Potrošni materijal",jed:"pak", pak:500,  minR:3,   minV:3,   dobId:9 },
+  { id:101, naziv:"ZOBOTREBCI 65mm leseni KRAFT (pak=1000 kos)",                   kat:"Potrošni materijal",jed:"pak", pak:1000, minR:3,   minV:3,   dobId:9 },
+  { id:102, naziv:"Mastni papir (karton=10kg)",                                     kat:"Potrošni materijal",jed:"kos", pak:1,    minR:3,   minV:3,   dobId:11 },
+  { id:103, naziv:"Nosilna vrečka BAŠČARŠIJA (pak=250 kos)",                       kat:"Potrošni materijal",jed:"pak", pak:250,  minR:3,   minV:3,   dobId:11 },
+  { id:104, naziv:"Burger Box BAŠČARŠIJA 190x150x70 (pak=210 kos)",               kat:"Potrošni materijal",jed:"pak", pak:210,  minR:0,   minV:0,   dobId:11 },
+  { id:105, naziv:"ROKAVICE NITRIL M, črne (pak=100kos)",                          kat:"Potrošni materijal",jed:"pak", pak:100,  minR:8,   minV:8,   dobId:10 },
+  { id:106, naziv:"ROKAVICE NITRIL L, črne (pak=100kos)",                          kat:"Potrošni materijal",jed:"pak", pak:100,  minR:2,   minV:2,   dobId:10 },
+  { id:107, naziv:"ROKAVICE NITRIL XL, črne (pak=100kos)",                         kat:"Potrošni materijal",jed:"pak", pak:100,  minR:2,   minV:2,   dobId:10 },
+  { id:108, naziv:"KAPA za kuhinjo BELA enkratna (pak=250kos)",                    kat:"Potrošni materijal",jed:"pak", pak:250,  minR:1,   minV:1,   dobId:10 },
+  { id:109, naziv:"GOBICA GLITZI mala RUMENA Vileda (pak=9kos)",                   kat:"Potrošni materijal",jed:"pak", pak:9,    minR:1,   minV:1,   dobId:10 },
+  { id:110, naziv:"GOBICA žična spiralna inoks (pak=2kos)",                        kat:"Potrošni materijal",jed:"pak", pak:2,    minR:2,   minV:2,   dobId:10 },
+  { id:111, naziv:"VREČKE ZELENA 110L (rol=25 kos)",                               kat:"Potrošni materijal",jed:"rol", pak:1,    minR:4,   minV:4,   dobId:10 },
+  { id:112, naziv:"VREČKE MODRA 110L (rol=25 kos)",                                kat:"Potrošni materijal",jed:"rol", pak:1,    minR:3,   minV:3,   dobId:10 },
+  { id:113, naziv:"VREČKE RUMENA 110L (rol=25 kos)",                               kat:"Potrošni materijal",jed:"rol", pak:1,    minR:3,   minV:3,   dobId:10 },
+  { id:114, naziv:"VREČKE 80x100 120L ČRNE PUREBA (rol=25 kos)",                   kat:"Potrošni materijal",jed:"rol", pak:1,    minR:3,   minV:3,   dobId:10 },
+  { id:115, naziv:"VREČKE 50x90 50L ČRNE (rol=25kos)",                             kat:"Potrošni materijal",jed:"rol", pak:1,    minR:2,   minV:2,   dobId:10 },
+  { id:116, naziv:"KRPA GOBASTA VILEDA 5 kos/pak",                                 kat:"Potrošni materijal",jed:"pak", pak:5,    minR:4,   minV:4,   dobId:10 },
+  { id:117, naziv:"PAPIRNATE BRISAČE CENTRAL TUBELESS MAXI PRO (pak=6rol)",       kat:"Potrošni materijal",jed:"pak", pak:6,    minR:2,   minV:2,   dobId:10 },
+  { id:118, naziv:"Toaletni papir LISTIČI BulkySoft 6000 kos/pak",                kat:"Potrošni materijal",jed:"pak", pak:1,    minR:2,   minV:2,   dobId:10 },
+  { id:119, naziv:"Brisače v roli 230m PUREBA (pak=6rol)",                         kat:"Potrošni materijal",jed:"pak", pak:6,    minR:2,   minV:2,   dobId:10 },
+  { id:120, naziv:"SERVIETE 38x38 BELE PUREBA (pak=50kos) — karton",              kat:"Potrošni materijal",jed:"pak", pak:50,   minR:5,   minV:5,   dobId:10 },
+  { id:121, naziv:"KRPA mikro PVAmicro 35x38cm rumena (kos)",                      kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:122, naziv:"KRPA kuhinjska 50x70cm 100% bombaž (kos)",                      kat:"Potrošni materijal",jed:"kos", pak:1,    minR:8,   minV:8,   dobId:10 },
+  { id:123, naziv:"Termo trak mali 57x34mm (pak=12m)",                             kat:"Potrošni materijal",jed:"pak", pak:12,   minR:6,   minV:6,   dobId:10 },
+  { id:124, naziv:"Termo trak veliki 80x80mm (pak=60m)",                           kat:"Potrošni materijal",jed:"pak", pak:60,   minR:12,  minV:12,  dobId:10 },
+  { id:125, naziv:"Čistilo Cif Professional HDW Vinegar 5L",                       kat:"Potrošni materijal",jed:"kos", pak:1,    minR:4,   minV:4,   dobId:10 },
+  { id:126, naziv:"Čistilo za steklo CRYSTAL VETRI 5L",                            kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:127, naziv:"Čistilo za maščobe DEGREASER ULTRA 5L",                         kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:128, naziv:"Čistilo za odtoke UNBLOCKER GEL 1L",                            kat:"Potrošni materijal",jed:"kos", pak:1,    minR:2,   minV:2,   dobId:10 },
+  { id:129, naziv:"DOMESTOS PINE FRESH 750ml",                                      kat:"Potrošni materijal",jed:"kos", pak:1,    minR:4,   minV:4,   dobId:10 },
+  { id:130, naziv:"Čistilo za površine SANIALC 5L",                                kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:131, naziv:"Čistilo ARF ORIGINAL Cream 400ml",                              kat:"Potrošni materijal",jed:"kos", pak:1,    minR:3,   minV:3,   dobId:10 },
+  { id:132, naziv:"Cif Suma Alcohol Spray D4.12 750mL",                            kat:"Potrošni materijal",jed:"kos", pak:1,    minR:2,   minV:2,   dobId:10 },
+  { id:133, naziv:"MILO penilno SENSITIVE FOAM 1L",                                kat:"Potrošni materijal",jed:"kos", pak:1,    minR:4,   minV:4,   dobId:10 },
+  { id:134, naziv:"Dezinfekcija za roke SURE Instant 1,3L",                        kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:135, naziv:"DOMESTOS POWER 5 OCEAN DUO PACK (pak=2kos)",                   kat:"Potrošni materijal",jed:"pak", pak:2,    minR:4,   minV:4,   dobId:10 },
+  { id:136, naziv:"Čistilo za les PARQUET 1L",                                     kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:137, naziv:"Osvežilec zraka DEO FRESH beli mošus 750mL",                   kat:"Potrošni materijal",jed:"kos", pak:1,    minR:2,   minV:2,   dobId:10 },
+  { id:138, naziv:"Čistilo za pečico FORNONET 5L",                                 kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:139, naziv:"SERVIETE 33x33 bele PUREBA (pak=50kos) — karton",              kat:"Potrošni materijal",jed:"pak", pak:50,   minR:4,   minV:4,   dobId:10 },
+  { id:140, naziv:"IGENIKAL FRESH vodni kamen 5L",                                  kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:141, naziv:"Čistilo za pomivanje STOWIL POWER SANITEC 15L",                kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:142, naziv:"Čistilo za pomivanje STOWIL POWER SANITEC 5L",                 kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:143, naziv:"Sredstvo za sijaj BRILL POWER SANITEC 15L",                    kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:144, naziv:"Sredstvo za sijaj BRILL POWER SANITEC 5L",                     kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:145, naziv:"Vrečke za živila PUREBA 1kg (pak=50kos)",                      kat:"Potrošni materijal",jed:"pak", pak:50,   minR:6,   minV:6,   dobId:10 },
+  { id:146, naziv:"SOL tabletirana za pomivalne stroje (kos=25kg)",                kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:147, naziv:"GOBICA pomivalna srednja rumena",                                kat:"Potrošni materijal",jed:"kos", pak:1,    minR:6,   minV:6,   dobId:10 },
+  { id:148, naziv:"Pralni prašek Ariel professional 7,5 kg",                       kat:"Potrošni materijal",jed:"kos", pak:1,    minR:1,   minV:1,   dobId:10 },
+  { id:149, naziv:"Mehčalec perila SOFTDET Sanitec 5L",                            kat:"Potrošni materijal",jed:"kos", pak:1,    minR:2,   minV:2,   dobId:10 },
+  { id:150, naziv:"GORENC LAVA KAMEN (Kos=3,5 kg)",                                kat:"Potrošni materijal",jed:"kos", pak:4,    minR:0,   minV:0,   dobId:12 },
+];
+
+// ─── Runtime state (populated per-user from Firestore) ───
+let stavke      = [];
+let stanje      = {};
+let poslatoMail = {};
+let editingId   = null;
+let nextId      = 151;
+
+// ═══════════════════════════════════════════════════════
+//  USER DATA — init / load (called by Firebase module)
+// ═══════════════════════════════════════════════════════
+window._initDefaultData = function() {
+  stavke = JSON.parse(JSON.stringify(DEFAULT_STAVKE));
+  stanje = {};
+  nextId = DEFAULT_STAVKE.reduce((m,s)=>Math.max(m,s.id),0) + 1;
+  window.stavke = stavke; window.stanje = stanje;
+  poslatoMail = {};
+  renderTables();
+};
+
+window._loadUserData = function(loadedStavke, loadedStanje) {
+  stavke = loadedStavke;
+  stanje = loadedStanje;
+  nextId = stavke.reduce((m,s)=>Math.max(m,s.id),0) + 1;
+  window.stavke = stavke; window.stanje = stanje;
+  poslatoMail = {};
+  renderTables();
+};
+
+function _triggerSave() {
+  window.stavke = stavke; window.stanje = stanje;
+  if (window._dbSave) window._dbSave();
+}
+
+// ═══════════════════════════════════════════════════════
+//  HELPERS
+// ═══════════════════════════════════════════════════════
+function getDateStr() { return document.getElementById('date-input').value; }
+
+function isVikend() {
+  // Logika narudzbine:
+  //   Četvrtak (4) → naručuje se za Pet+Sub+Ned → vikend minimumi (viši)
+  //   Ponedeljak (1) → naručuje se za Pon-Čet   → radni minimumi
+  //   Pet/Sub/Ned → vikend period
+  //   Uto/Sri → radni period
+  const d = getDateStr();
+  if(!d) return false;
+  const day = new Date(d+'T12:00:00').getDay();
+  return day === 4 || day === 5 || day === 6 || day === 0;
+}
+
+function calcNarudzba(s) {
+  const min   = isVikend() ? s.minV : s.minR;
+  const curr  = stanje[s.id] ?? '';
+  if(curr === '' || curr === null) return { fali: 0, naruciti: 0, noData: true };
+  const fali  = Math.max(0, min - Number(curr));
+  const p     = Math.max(1, s.pak || 1);
+  const naruciti = fali > 0 ? Math.ceil(fali / p) * p : 0;
+  return { fali, naruciti, noData: false };
+}
+
+function narudzbineAll() {
+  return stavke.filter(s => calcNarudzba(s).naruciti > 0);
+}
+
+// ═══════════════════════════════════════════════════════
+//  PERIOD
+// ═══════════════════════════════════════════════════════
+function updatePeriod() {
+  const vik = isVikend();
+  const pill = document.getElementById('period-pill');
+  const dot  = document.getElementById('period-dot');
+  const txt  = document.getElementById('period-txt');
+  const la   = document.getElementById('legend-aktivan');
+  const day = new Date((getDateStr()||new Date().toISOString().split('T')[0])+'T12:00:00').getDay();
+  const labels = {
+    1: 'Narudžbina za Pon–Čet',
+    2: 'Narudžbina za Pon–Čet',
+    3: 'Narudžbina za Pon–Čet',
+    4: 'Narudžbina za Pet–Ned',
+    5: 'Narudžbina za Pet–Ned',
+    6: 'Narudžbina za Pet–Ned',
+    0: 'Narudžbina za Pet–Ned',
+  };
+  const periodLabel = labels[day] || (vik ? 'Narudžbina za Pet–Ned' : 'Narudžbina za Pon–Čet');
+  if(vik) {
+    pill.style.background = 'rgba(154,32,112,.18)';
+    pill.style.color = '#c040a0';
+    pill.style.border = '1px solid rgba(154,32,112,.3)';
+    dot.style.background  = '#c040a0';
+    txt.textContent       = periodLabel;
+    if(la) { la.style.color = 'var(--vikend)'; la.textContent = 'podvučen · zaliha Pet–Ned'; }
+  } else {
+    pill.style.background = 'rgba(16,96,176,.18)';
+    pill.style.color = '#4090e0';
+    pill.style.border = '1px solid rgba(16,96,176,.3)';
+    dot.style.background  = '#4090e0';
+    txt.textContent       = periodLabel;
+    if(la) { la.style.color = 'var(--radni)'; la.textContent = 'podvučen · zaliha Pon–Čet'; }
+  }
+  document.querySelectorAll('.inp-min').forEach(el => {
+    el.classList.remove('aktivan');
+    if((vik && el.classList.contains('vikend')) || (!vik && el.classList.contains('radni')))
+      el.classList.add('aktivan');
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+//  RENDER TABLES
+// ═══════════════════════════════════════════════════════
+function renderStats() {
+  const total   = stavke.length;
+  const entered = stavke.filter(s => stanje[s.id] !== undefined && stanje[s.id] !== '').length;
+  const need    = narudzbineAll().length;
+  const ok      = entered - need;
+  document.getElementById('stats-grid').innerHTML = `
+    <div class="stat-box" style="border-top-color:var(--brown)">
+      <div class="stat-val">${total}</div>
+      <div class="stat-lbl">Ukupno Stavki</div>
+    </div>
+    <div class="stat-box" style="border-top-color:#888">
+      <div class="stat-val" style="color:#666">${entered}</div>
+      <div class="stat-lbl">Uneseno Popisov</div>
+    </div>
+    <div class="stat-box" style="border-top-color:var(--need)">
+      <div class="stat-val" style="color:var(--need)">${need}</div>
+      <div class="stat-lbl">Treba Naručiti</div>
+    </div>
+    <div class="stat-box" style="border-top-color:var(--ok)">
+      <div class="stat-val" style="color:var(--ok)">${ok < 0 ? 0 : ok}</div>
+      <div class="stat-lbl">Zalihe OK</div>
+    </div>
+  `;
+}
+
+function renderTables() {
+  const vik = isVikend();
+  // Group by dobavljac then category
+  const byDob = {};
+  DOBAVLJACI.forEach(d => { byDob[d.id] = { dob: d, cats: {} }; });
+  stavke.forEach(s => {
+    if(!byDob[s.dobId]) return;
+    if(!byDob[s.dobId].cats[s.kat]) byDob[s.dobId].cats[s.kat] = [];
+    byDob[s.dobId].cats[s.kat].push(s);
+  });
+
+  let html = '';
+  DOBAVLJACI.forEach(dob => {
+    const cats = byDob[dob.id]?.cats;
+    if(!cats || Object.keys(cats).length === 0) return;
+    html += `
+    <div style="margin-bottom:32px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
+        <div style="width:10px;height:10px;border-radius:50%;background:${dob.boja};flex-shrink:0"></div>
+        <span style="font-family:'Sanchez',serif;font-size:15px;color:var(--brown)">${dob.naziv}</span>
+        <span style="font-size:10px;color:var(--brown3)">${dob.email}</span>
+        <div style="flex:1;height:1px;background:var(--border)"></div>
+      </div>`;
+
+    Object.entries(cats).forEach(([kat, items]) => {
+      const katColor = KAT_BOJE[kat] || '#666';
+      html += `
+        <div class="cat-header">
+          <div class="cat-bar" style="background:${katColor}"></div>
+          <span class="cat-name">${kat}</span>
+          <div class="cat-sep"></div>
+        </div>
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th style="width:36%">Artikel</th>
+              <th>Stanje</th>
+              <th>Min Pon–Čet</th>
+              <th>Min Pet–Ned</th>
+              <th>Pakovanje</th>
+              <th>Naručiti</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>`;
+      items.forEach(s => {
+        const { fali, naruciti, noData } = calcNarudzba(s);
+        const hasNeed = naruciti > 0;
+        const currVal = stanje[s.id] !== undefined ? stanje[s.id] : '';
+        const gajbi = s.pak > 1 ? naruciti / s.pak : null;
+        const zaokr = s.pak > 1 && naruciti !== fali && naruciti > 0;
+        html += `
+            <tr id="row-${s.id}" class="${hasNeed ? 'row-need' : noData ? '' : 'row-ok'}">
+              <td style="font-size:12px;color:var(--brown)">${s.naziv}</td>
+              <td>
+                <input type="number" class="inp-stanje" id="inp-${s.id}"
+                  value="${currVal}" min="0" placeholder="—"
+                  onchange="updateStanje(${s.id}, this.value)"
+                  oninput="updateStanje(${s.id}, this.value)">
+              </td>
+              <td>
+                <input type="number" class="inp-min radni${vik?'':' aktivan'}" value="${s.minR}" min="0"
+                  onchange="updateMin(${s.id},'minR',this.value)"> ${s.jed}
+              </td>
+              <td>
+                <input type="number" class="inp-min vikend${vik?' aktivan':''}" value="${s.minV}" min="0"
+                  onchange="updateMin(${s.id},'minV',this.value)"> ${s.jed}
+              </td>
+              <td>
+                <input type="number" class="inp-pak" value="${s.pak}" min="1"
+                  onchange="updatePak(${s.id},this.value)"> ${s.jed}
+              </td>
+              <td id="naruciti-${s.id}">
+                ${hasNeed
+                  ? `<div class="gajba-info">${naruciti} ${s.jed}${gajbi&&gajbi>1?`<span class="gajba-sub">(${gajbi} pak.)</span>`:''}</div>
+                     ${zaokr?`<div style="font-size:10px;color:var(--brown3);margin-top:2px;">fali ${fali} → zaokruženo na ${s.pak}</div>`:''}`
+                  : noData
+                    ? '<span style="font-size:11px;color:var(--brown3)">—</span>'
+                    : '<span style="font-size:12px;color:var(--ok);font-weight:600">✓ OK</span>'
+                }
+              </td>
+              <td>
+                <div style="display:flex;gap:6px;">
+                  <button class="btn-del" onclick="editItem(${s.id})" title="Uredi">✎</button>
+                  <button class="btn-del" onclick="deleteItem(${s.id})" title="Obriši">✕</button>
+                </div>
+              </td>
+            </tr>`;
+      });
+      html += `</tbody></table>`;
+    });
+    html += `</div>`;
+  });
+
+  document.getElementById('tables-container').innerHTML = html;
+  renderStats();
+  const n = narudzbineAll().length;
+  document.getElementById('btn-k1-next').textContent = `Pregledaj Narudžbinu (${n}) →`;
+}
+
+// ═══════════════════════════════════════════════════════
+//  RENDER PREGLED
+// ═══════════════════════════════════════════════════════
+function renderPregled() {
+  const vik   = isVikend();
+  const datum = getDateStr();
+  const datumF = datum ? new Date(datum+'T12:00:00').toLocaleDateString('sl-SI',{weekday:'long',day:'numeric',month:'long',year:'numeric'}) : '';
+  document.getElementById('k2-sub').textContent = `${datumF} · ${vik ? 'Vikend' : 'Radni dan'}`;
+
+  const lista = narudzbineAll();
+  if(!lista.length) {
+    document.getElementById('pregled-container').innerHTML =
+      `<div style="text-align:center;padding:60px 20px;color:var(--brown3);">
+        <div style="font-family:'Sanchez',serif;font-size:28px;margin-bottom:10px;">✓</div>
+        <div style="font-size:14px;">Sve zalihe su iznad minimuma — nema narudžbina.</div>
+      </div>`;
+    return;
+  }
+
+  const byDob = {};
+  lista.forEach(s => {
+    if(!byDob[s.dobId]) byDob[s.dobId] = [];
+    byDob[s.dobId].push(s);
+  });
+
+  let html = '';
+  DOBAVLJACI.forEach(dob => {
+    const items = byDob[dob.id];
+    if(!items) return;
+    html += `
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:8px;border-bottom:1.5px solid ${dob.boja}40;">
+        <div style="width:10px;height:10px;border-radius:50%;background:${dob.boja}"></div>
+        <span style="font-family:'Sanchez',serif;font-size:16px;color:var(--brown)">${dob.naziv}</span>
+        <span style="font-size:11px;color:var(--brown3)">${dob.email}</span>
+        <span style="font-size:10px;color:var(--brown3);margin-left:auto">${items.length} ${items.length===1?'stavka':'stavke'}</span>
+      </div>
+      <table class="tbl">
+        <thead><tr>
+          <th>Artikel</th><th>Naručiti</th><th>Pakovanje</th><th>Napomena</th>
+        </tr></thead>
+        <tbody>`;
+    items.forEach(s => {
+      const { fali, naruciti } = calcNarudzba(s);
+      const gajbi = s.pak > 1 ? naruciti / s.pak : null;
+      const zaokr = s.pak > 1 && naruciti !== fali;
+      html += `
+        <tr class="row-need">
+          <td style="font-size:12px">${s.naziv}</td>
+          <td><span class="gajba-info">${naruciti} ${s.jed}${gajbi&&gajbi>1?`<span class="gajba-sub">(${gajbi} pak.)</span>`:''}</span></td>
+          <td style="font-size:11px;color:var(--brown3)">${s.pak > 1 ? `${s.pak} ${s.jed}/pak` : 'komad'}</td>
+          <td style="font-size:10px;color:var(--brown3)">${zaokr?`fali ${fali}, naručujemo ${naruciti}`:''}</td>
+        </tr>`;
+    });
+    html += `</tbody></table></div>`;
+  });
+  document.getElementById('pregled-container').innerHTML = html;
+}
+
+// ═══════════════════════════════════════════════════════
+//  GEN EMAIL
+// ═══════════════════════════════════════════════════════
+function genEmail(dobId) {
+  const dob  = DOBAVLJACI.find(d=>d.id===dobId);
+  const vik  = isVikend();
+  const datum = getDateStr();
+  const datumF = datum ? new Date(datum+'T12:00:00').toLocaleDateString('sl-SI',{weekday:'long',day:'numeric',month:'long',year:'numeric'}) : '';
+  const items = stavke.filter(s => s.dobId===dobId && calcNarudzba(s).naruciti > 0);
+  if(!items.length) return '';
+
+  let lines = `Etno Hiša Baščaršija — Narudžbina\n`;
+  lines += `Datum: ${datumF}\n`;
+  lines += `Period: ${vik ? 'Vikend (Pet–Ned)' : 'Radni dan (Pon–Čet)'}\n`;
+  lines += `─────────────────────────────────────\n\n`;
+  lines += `Spoštovani ${dob.naziv},\n\n`;
+  lines += `naročamo naslednje artikel:\n\n`;
+  items.forEach(s => {
+    const { naruciti } = calcNarudzba(s);
+    const gajbi = s.pak > 1 ? ` (${naruciti/s.pak} pak. × ${s.pak} ${s.jed})` : '';
+    lines += `  • ${s.naziv}:  ${naruciti} ${s.jed}${gajbi}\n`;
+  });
+  lines += `\nHvala,\nEtno Hiša Baščaršija\n`;
+  lines += `MB Poštna 8 | LJ Trubarjeva 52 | KP Carpacciov trg 6\n`;
+  lines += `www.bascarsija.si`;
+  return lines;
+}
+
+// ═══════════════════════════════════════════════════════
+//  RENDER EMAIL
+// ═══════════════════════════════════════════════════════
+function renderEmail() {
+  const vik  = isVikend();
+  const datum = getDateStr();
+  const datumF = datum ? new Date(datum+'T12:00:00').toLocaleDateString('sl-SI',{weekday:'long',day:'numeric',month:'long',year:'numeric'}) : '';
+  document.getElementById('k3-sub').textContent = `${datumF} · ${vik ? 'Vikend' : 'Radni dan'}`;
+
+  const active = DOBAVLJACI.filter(d => stavke.some(s => s.dobId===d.id && calcNarudzba(s).naruciti > 0));
+  const sent   = active.filter(d => poslatoMail[d.id]).length;
+  document.getElementById('email-stats').innerHTML = `
+    <div class="stat-box" style="border-top-color:var(--brown)">
+      <div class="stat-val">${active.length}</div>
+      <div class="stat-lbl">Dobavljača Za Naručiti</div>
+    </div>
+    <div class="stat-box" style="border-top-color:var(--ok)">
+      <div class="stat-val" style="color:var(--ok)">${sent}</div>
+      <div class="stat-lbl">Poslano</div>
+    </div>
+    <div class="stat-box" style="border-top-color:var(--need)">
+      <div class="stat-val" style="color:var(--need)">${active.length - sent}</div>
+      <div class="stat-lbl">Čeka Slanje</div>
+    </div>
+    <div class="stat-box" style="border-top-color:var(--brown3)">
+      <div class="stat-val" style="color:var(--brown3)">${stavke.filter(s=>calcNarudzba(s).naruciti>0).length}</div>
+      <div class="stat-lbl">Ukupno Stavki</div>
+    </div>`;
+
+  let html = '';
+  DOBAVLJACI.forEach(dob => {
+    const items = stavke.filter(s => s.dobId===dob.id && calcNarudzba(s).naruciti > 0);
+    if(!items.length) return;
+    const isSent = poslatoMail[dob.id];
+    const emailTxt = genEmail(dob.id);
+    html += `
+    <div class="dob-card ${isSent?'sent':''}" style="border-left-color:${dob.boja}">
+      <div class="dob-head">
+        <div>
+          <div class="dob-name">${dob.naziv}</div>
+          <div class="dob-email">${dob.email}</div>
+        </div>
+        <div class="email-actions">
+          ${isSent ? `<span class="sent-tag">✓ Poslano</span>` : ''}
+          <button class="btn-primary" onclick="sendMail(${dob.id})">
+            ${isSent ? '↺ Pošalji Ponovo' : '✉ Pošalji Email'}
+          </button>
+        </div>
+      </div>
+      <div class="dob-body">
+        <div class="dob-grid">
+          <div>
+            <div class="preview-title">Stavke Narudžbine (${items.length})</div>
+            <table class="tbl">
+              <thead><tr><th>Artikel</th><th>Količina</th></tr></thead>
+              <tbody>
+                ${items.map(s => {
+                  const {naruciti} = calcNarudzba(s);
+                  const gajbi = s.pak>1 ? naruciti/s.pak : null;
+                  return `<tr class="row-need"><td style="font-size:11px">${s.naziv}</td>
+                  <td style="font-weight:600">${naruciti} ${s.jed}${gajbi&&gajbi>1?`<span class="gajba-sub">(${gajbi} pak.)</span>`:''}</td></tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <div class="preview-title">Predogled Emaila</div>
+            <div class="preview-box">
+              <div class="preview-text">${emailTxt.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  });
+
+  document.getElementById('email-container').innerHTML = html;
+}
+
+function sendMail(dobId) {
+  const dob    = DOBAVLJACI.find(d=>d.id===dobId);
+  const datum  = getDateStr();
+  const datumF = datum ? new Date(datum+'T12:00:00').toLocaleDateString('sl-SI') : '';
+  const subject = encodeURIComponent(`Narudžbina — ${datumF} — Baščaršija`);
+  const body    = encodeURIComponent(genEmail(dobId));
+  window.open(`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(dob.email)}&su=${subject}&body=${body}`, '_blank');
+  poslatoMail[dobId] = true;
+  renderEmail();
+}
+
+// ═══════════════════════════════════════════════════════
+//  DATA MUTATIONS
+// ═══════════════════════════════════════════════════════
+function updateStanje(id, val) {
+  stanje[id] = val;
+  refreshRow(id);
+  renderStats();
+  const n = narudzbineAll().length;
+  document.getElementById('btn-k1-next').textContent = `Pregledaj Narudžbinu (${n}) →`;
+  _triggerSave();
+}
+
+function updateMin(id, field, val) {
+  const s = stavke.find(x=>x.id===id); if(!s) return;
+  s[field] = parseFloat(val)||0;
+  refreshRow(id); renderStats();
+  document.getElementById('btn-k1-next').textContent = `Pregledaj Narudžbinu (${narudzbineAll().length}) →`;
+  _triggerSave();
+}
+
+function updatePak(id, val) {
+  const s = stavke.find(x=>x.id===id); if(!s) return;
+  s.pak = Math.max(1, parseInt(val)||1);
+  refreshRow(id); renderStats();
+  _triggerSave();
+}
+
+function refreshRow(id) {
+  const s = stavke.find(x=>x.id===id); if(!s) return;
+  const { fali, naruciti, noData } = calcNarudzba(s);
+  const cell = document.getElementById(`naruciti-${id}`);
+  const row  = document.getElementById(`row-${id}`);
+  if(!cell||!row) return;
+  const gajbi = s.pak > 1 ? naruciti / s.pak : null;
+  const zaokr = s.pak > 1 && naruciti !== fali && naruciti > 0;
+  if(naruciti > 0) {
+    cell.innerHTML = `
+      <div class="gajba-info">${naruciti} ${s.jed}${gajbi&&gajbi>1?`<span class="gajba-sub">(${gajbi} pak.)</span>`:''}</div>
+      ${zaokr?`<div style="font-size:10px;color:var(--brown3);margin-top:2px;">fali ${fali} → zaokruženo na ${s.pak}</div>`:''}`;
+    row.className = 'row-need';
+  } else if(noData) {
+    cell.innerHTML = `<span style="font-size:11px;color:var(--brown3)">—</span>`;
+    row.className  = '';
+  } else {
+    cell.innerHTML = `<span style="font-size:12px;color:var(--ok);font-weight:600">✓ OK</span>`;
+    row.className  = 'row-ok';
+  }
+}
+
+function deleteItem(id) {
+  if(!confirm('Obrisati stavku?')) return;
+  stavke = stavke.filter(s=>s.id!==id);
+  delete stanje[id];
+  renderTables();
+  _triggerSave();
+}
+
+// ═══════════════════════════════════════════════════════
+//  MODAL
+// ═══════════════════════════════════════════════════════
+function populateModal() {
+  const kats = [...new Set(stavke.map(s=>s.kat)), '+ Nova kategorija'];
+  document.getElementById('m-kat').innerHTML = kats.map(k=>`<option>${k}</option>`).join('');
+  document.getElementById('m-dob').innerHTML = DOBAVLJACI.map(d=>`<option value="${d.id}">${d.naziv}</option>`).join('');
+  updatePakHint();
+}
+
+function updatePakHint() {
+  const pak = parseInt(document.getElementById('m-pak').value)||1;
+  const jed = document.getElementById('m-jed').value;
+  document.getElementById('m-pak-hint').textContent =
+    pak===1 ? `${jed} — naručuje se po 1` : `${jed} — naručuje se u pakovanjima od ${pak}`;
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('m-pak').addEventListener('input', updatePakHint);
+  document.getElementById('m-jed').addEventListener('change', updatePakHint);
+});
+
+function openModal() {
+  editingId = null;
+  document.getElementById('modal-title').textContent    = 'Dodaj Novu Stavku';
+  document.getElementById('modal-save-btn').textContent = 'Dodaj Stavku';
+  document.getElementById('m-naziv').value = '';
+  document.getElementById('m-pak').value   = 1;
+  document.getElementById('m-minR').value  = 0;
+  document.getElementById('m-minV').value  = 0;
+  populateModal();
+  document.getElementById('modal').classList.remove('hidden');
+}
+
+function editItem(id) {
+  const s = stavke.find(x=>x.id===id); if(!s) return;
+  editingId = id;
+  document.getElementById('modal-title').textContent    = 'Uredi Stavku';
+  document.getElementById('modal-save-btn').textContent = 'Sačuvaj Izmene';
+  document.getElementById('m-naziv').value = s.naziv;
+  document.getElementById('m-pak').value   = s.pak;
+  document.getElementById('m-minR').value  = s.minR;
+  document.getElementById('m-minV').value  = s.minV;
+  populateModal();
+  document.getElementById('m-kat').value = s.kat;
+  document.getElementById('m-jed').value = s.jed;
+  document.getElementById('m-dob').value = s.dobId;
+  updatePakHint();
+  document.getElementById('modal').classList.remove('hidden');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.add('hidden');
+  editingId = null;
+}
+
+function saveModal() {
+  const naziv = document.getElementById('m-naziv').value.trim();
+  if(!naziv) { alert('Unesite naziv artikla.'); return; }
+  const kat   = document.getElementById('m-kat').value;
+  const jed   = document.getElementById('m-jed').value;
+  const pak   = Math.max(1, parseInt(document.getElementById('m-pak').value)||1);
+  const minR  = parseFloat(document.getElementById('m-minR').value)||0;
+  const minV  = parseFloat(document.getElementById('m-minV').value)||0;
+  const dobId = parseInt(document.getElementById('m-dob').value);
+  if(editingId !== null) {
+    const s = stavke.find(x=>x.id===editingId);
+    if(s) Object.assign(s, {naziv,kat,jed,pak,minR,minV,dobId});
+  } else {
+    stavke.push({id:nextId++,naziv,kat,jed,pak,minR,minV,dobId});
+  }
+  closeModal();
+  renderTables();
+  _triggerSave();
+}
+
+// ═══════════════════════════════════════════════════════
+//  NAVIGATION
+// ═══════════════════════════════════════════════════════
+function showKorak(k) {
+  [1,2,3].forEach(i => {
+    document.getElementById(`page${i}`).style.display = i===k ? 'block' : 'none';
+    document.getElementById(`tab${i}`).classList.toggle('active', i===k);
+  });
+  if(k===2) renderPregled();
+  if(k===3) renderEmail();
+}
+
+// ═══════════════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════════════
+(function init() {
+  const today = new Date().toISOString().split('T')[0];
+  const dateInput = document.getElementById('date-input');
+  dateInput.value = today;
+  dateInput.addEventListener('change', () => {
+    poslatoMail = {};
+    updatePeriod();
+    renderTables();
+  });
+  updatePeriod();
+  // renderTables() će biti pozvano iz _loadUserData / _initDefaultData nakon što Firebase učita podatke
+})();
+</script>
+
+</div><!-- #app-wrapper -->
+
+<!-- ═══════════════════════════════ PWA ═══════════════════════════════ -->
+<script>
+// ─── Inline Manifest (injected as blob so no separate file needed) ───
+(function() {
+  const icons = [
+    { size: 192, bg: '#332823', fg: '#FFF6D9' },
+    { size: 512, bg: '#332823', fg: '#FFF6D9' }
+  ];
+
+  // Generate SVG icon as data URL
+  function makeIcon(size) {
+    const s = size;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${s}" height="${s}" viewBox="0 0 ${s} ${s}">
+      <rect width="${s}" height="${s}" fill="#332823"/>
+      <rect width="${s}" height="${s}" fill="#004428"/>
+      <path d="${[
+        `M${s*.19} ${s*.73}`,
+        `L${s*.5} ${s*.27}`,
+        `L${s*.81} ${s*.73}`
+      ].join(' ')}" stroke="#FFF6D9" stroke-width="${s*.042}" fill="none" stroke-linejoin="round"/>
+      <path d="M${s*.31} ${s*.58} L${s*.69} ${s*.58}" stroke="#FFF6D9" stroke-width="${s*.027}"/>
+      <circle cx="${s*.5}" cy="${s*.27}" r="${s*.048}" fill="#FFF6D9"/>
+      <rect x="${s*.44}" y="${s*.73}" width="${s*.12}" height="${s*.077}" fill="#FFF6D9" opacity=".4"/>
+    </svg>`;
+    return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+  }
+
+  const manifest = {
+    name: 'Baščaršija — Sistem Narudžbina',
+    short_name: 'Baščaršija',
+    description: 'Sistem narudžbina i upravljanja zalihama',
+    start_url: './',
+    display: 'standalone',
+    background_color: '#332823',
+    theme_color: '#332823',
+    orientation: 'any',
+    icons: [
+      { src: makeIcon(192), sizes: '192x192', type: 'image/svg+xml', purpose: 'any maskable' },
+      { src: makeIcon(512), sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' }
+    ]
+  };
+
+  const blob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  document.getElementById('pwa-manifest').href = url;
+})();
+
+// ─── Service Worker (inline via blob) ───
+(function() {
+  const swCode = `
+const CACHE = 'bascarsija-v1';
+const FONTS = [
+  'https://fonts.googleapis.com/css2?family=Sanchez:ital@0;1&family=Source+Code+Pro:wght@400;500;600&display=swap'
+];
+
+self.addEventListener('install', e => {
+  self.skipWaiting();
+  e.waitUntil(
+    caches.open(CACHE).then(c => c.addAll(FONTS).catch(()=>{}))
+  );
+});
+
+self.addEventListener('activate', e => {
+  e.waitUntil(
+    caches.keys().then(keys =>
+      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+    )
+  );
+  self.clients.claim();
+});
+
+self.addEventListener('fetch', e => {
+  // Network-first za Firebase (uvijek svježi podaci)
+  if (e.request.url.includes('firebase') || e.request.url.includes('googleapis.com/identitytoolkit')) {
+    return;
+  }
+  // Cache-first za fontove
+  if (e.request.url.includes('fonts.')) {
+    e.respondWith(
+      caches.match(e.request).then(r => r || fetch(e.request).then(res => {
+        const clone = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, clone));
+        return res;
+      }))
+    );
+    return;
+  }
+  // Network-first za sve ostalo
+  e.respondWith(
+    fetch(e.request).catch(() => caches.match(e.request))
+  );
+});
+`;
+  const blob = new Blob([swCode], { type: 'application/javascript' });
+  const url  = URL.createObjectURL(blob);
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register(url, { scope: './' })
+      .then(() => console.log('[PWA] Service Worker registrovan'))
+      .catch(e => console.warn('[PWA] SW greška:', e));
+  }
+})();
+
+// ─── Install prompt ───
+let _deferredPrompt = null;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredPrompt = e;
+  const btn = document.getElementById('pwa-install-btn');
+  if (btn) btn.style.display = 'inline-block';
+});
+
+window.addEventListener('appinstalled', () => {
+  _deferredPrompt = null;
+  const btn = document.getElementById('pwa-install-btn');
+  if (btn) btn.style.display = 'none';
+});
+
+window.pwaInstall = async function() {
+  if (!_deferredPrompt) return;
+  _deferredPrompt.prompt();
+  const { outcome } = await _deferredPrompt.userChoice;
+  if (outcome === 'accepted') _deferredPrompt = null;
+};
+</script>
+
+</body>
+</html>
